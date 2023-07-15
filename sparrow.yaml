@@ -2,22 +2,83 @@ image:
   - melezhik/sparrow:debian
 
 tasks:
-  - 
-    name: add-pakku
-    default: true
-    followup:
-      -
-        name: add-dist
-    language: Bash
-    code: |
-      set -e
-      sudo apt-get update
-      sudo apt-get install -y libarchive13 > /dev/null
-      cd source
-      raku -I. bin/pakku add .
   -
-    name: add-dist
+    name: main
+    default: true
+    language: Raku
+    code: |
+      use Text::Table::Simple;
+      my @columns = ("Rakudo Version", "Status", "Time", "Linux Dist");
+      my @rows;
+      my $fail = False;
+      for config()<tasks><multi-versions><state><list><> -> $i {
+        @rows.push: [ $i<version>, $i<status>,  $i<time>, os() ];
+        $fail = True unless $i<status> eq "OK";
+      }
+      my @table = lol2table(@columns,@rows);
+      .say for @table;
+      die "some tests failed" if $fail == True;
+    depends:
+      -
+        name: multi-versions
+  -
+    name: multi-versions
+    language: Raku
+    config:
+      list:
+        - 2022.04
+        - 2022.06
+        - 2023.06
+        - 2022.12
+    code: |
+      my @state;
+      for config()<list><> -> $v {
+        my $s = %( version => $v );
+        if "{cache_root_dir()}/{$v}_ok".IO ~~ :e {
+          $s<status> = "OK";
+        } else {
+          $s<status> = "FAIL";
+        }
+        if "{cache_root_dir()}/{$v}_time".IO ~~ :e {
+          $s<time> = "{cache_root_dir()}/{$v}_time".IO.slurp();
+        } else {
+          $s<time> = "NA";
+        }
+        @state.push: $s;
+      }
+      update_state %( list => @state );
+    init: |
+      for config()<list><> -> $v {
+        run_task("test", %( version => $v ));
+      }
+    subtasks:
+      -
+        name: test
+        language: Bash
+        init: |
+          ignore_error
+        code: |
+          set -e
+          rakubrew download moar-$version
+          rakubrew switch moar-$version
+          cd source/
+          raku -I. bin/pakku add .
+          which pakku
+          /usr/bin/time -f "%E real,%U user,%S sys" -o "${cache_root_dir}/${version}_time" \
+          pakku async add rak && touch "${cache_root_dir}/${version}_ok"
+    depends:
+      -
+        name: deps-install
+  -
+    name: deps-install
     language: Bash
     code: |
       set -e
-      pakku async add rak
+      curl -sf https://rakubrew.org/perl/rakubrew -o rakubrew
+      sudo mv rakubrew /usr/local/bin
+      sudo chmod a+x /usr/local/bin/rakubrew
+      rakubrew mode shim
+      zef install --/test Text::Table::Simple
+      sudo apt-get update -qq > /dev/null
+      sudo apt-get install -qq -y libarchive13 time > /dev/null
+      
